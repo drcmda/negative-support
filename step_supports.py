@@ -77,6 +77,17 @@ def find_overhang_faces(
     # 0° = horizontal (nz=-1), 45° = nz≈-0.707, 90° = vertical (nz=0)
     nz_threshold = -math.cos(math.radians(angle))
 
+    # Mid-air detection bounds:
+    # - Lower bound: faces must be at least 2° steeper than the overhang
+    #   threshold. Faces right at the boundary (e.g. exactly 45°) are
+    #   borderline and don't need mid-air support.
+    # - Upper bound: nearly-vertical faces (>70° from horizontal) can
+    #   self-support from their edge connections even if starting mid-air.
+    mid_air_min_angle = max(angle - 2.0, 0.0)
+    nz_midair_steep = -math.cos(math.radians(mid_air_min_angle))
+    mid_air_max_angle = min(angle + 25.0, 80.0)
+    nz_midair_limit = -math.cos(math.radians(mid_air_max_angle))
+
     overhang_faces = []
 
     for i, face in enumerate(part.faces()):
@@ -142,8 +153,10 @@ def find_overhang_faces(
         # Check 1: overhang angle (use min_nz for curved faces)
         if min_nz < nz_threshold:
             reason = "overhang"
-        # Check 2: mid-air — lowest point has no model below it
-        elif bb.min.Z > 0.5:
+        # Check 2: mid-air — only for faces steep enough to matter but
+        # not right at the overhang threshold boundary, and not nearly
+        # vertical (which can self-support from edge connections)
+        elif min_nz < nz_midair_steep and min_nz < nz_midair_limit and bb.min.Z > 0.5:
             if _is_mid_air(face, bb, model_mesh):
                 reason = "mid-air"
 
