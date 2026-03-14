@@ -22,7 +22,7 @@ import time
 
 import numpy as np
 import trimesh
-from build123d import Location, Solid, export_stl, import_step, offset
+from build123d import Kind, Location, Solid, export_stl, import_step, offset
 
 
 def load_step(path: str, verbose: bool = False) -> tuple[Solid, float]:
@@ -79,6 +79,66 @@ def find_overhang_faces(part: Solid, threshold: float = -0.5, verbose: bool = Fa
     return overhang_faces
 
 
+def _repair_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Remove degenerate faces and repair mesh to be watertight."""
+    # Remove zero-area faces that break watertightness
+    areas = mesh.area_faces
+    good = areas > 1e-8
+    if not good.all():
+        mesh = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces[good])
+        mesh.remove_unreferenced_vertices()
+
+    trimesh.repair.fix_winding(mesh)
+    trimesh.repair.fix_normals(mesh)
+    trimesh.repair.fill_holes(mesh)
+    return mesh
+
+
+def _offset_to_mesh(
+    part: Solid, margin: float, stl_tolerance: float, verbose: bool
+) -> trimesh.Trimesh:
+    """Offset the solid outward and return as a trimesh.
+
+    Tries B-Rep offset with multiple kernel modes first. Falls back to
+    vertex-normal inflation on the tessellated mesh if all B-Rep attempts fail.
+    """
+    # Try B-Rep offset with different kinds
+    for kind in (Kind.ARC, Kind.INTERSECTION, Kind.TANGENT):
+        try:
+            inflated = offset(part, amount=margin, kind=kind)
+            with tempfile.NamedTemporaryFile(suffix=".stl") as tmp:
+                export_stl(inflated, tmp.name, tolerance=stl_tolerance)
+                mesh = trimesh.load(tmp.name)
+            mesh = _repair_mesh(mesh)
+            if verbose:
+                print(f"    B-Rep offset succeeded (kind={kind.name})")
+            return mesh
+        except Exception:
+            continue
+
+    # Fallback: tessellate, then inflate along vertex normals.
+    # Vertex-normal inflation undershoots at sharp edges, so we subdivide
+    # first and use 2x margin to compensate.
+    print("  Warning: B-Rep offset failed — using mesh approximation, "
+          "margin may be uneven near sharp edges")
+    if verbose:
+        print("    Tessellating model...")
+    with tempfile.NamedTemporaryFile(suffix=".stl") as tmp:
+        export_stl(part, tmp.name, tolerance=stl_tolerance)
+        mesh = trimesh.load(tmp.name)
+
+    mesh = _repair_mesh(mesh)
+
+    # Subdivide to add vertices at edges where normals diverge most
+    mesh = mesh.subdivide()
+
+    # Use 2x margin to compensate for undershoot at convex edges
+    mesh.vertices += mesh.vertex_normals * (margin * 2.0)
+
+    mesh = _repair_mesh(mesh)
+    return mesh
+
+
 def compute_supports(
     part: Solid,
     margin: float = 0.2,
@@ -92,12 +152,7 @@ def compute_supports(
     # Offset model outward (provides the margin gap)
     if verbose:
         print("  Offsetting model...")
-    inflated = offset(part, amount=margin)
-
-    # Export inflated model to mesh for boolean operations
-    with tempfile.NamedTemporaryFile(suffix=".stl") as tmp:
-        export_stl(inflated, tmp.name, tolerance=stl_tolerance)
-        inflated_mesh = trimesh.load(tmp.name)
+    inflated_mesh = _offset_to_mesh(part, margin, stl_tolerance, verbose)
 
     if verbose:
         print(f"  Offset done in {time.time() - t0:.1f}s")
@@ -195,15 +250,27 @@ def compute_supports(
                 print(f"    No region")
             continue
 
-        # Split into components and keep those above min_volume
+        # Split into components, filter by volume and Z-overlap with face
         components = region.split(only_watertight=False)
+        good = []
         for comp in components:
             vol = abs(comp.volume)
-            if vol >= min_volume:
-                support_pieces.append(comp)
+            if vol < min_volume:
+                continue
+            # Discard pieces whose Z range doesn't overlap the face
+            comp_z_min = comp.bounds[0][2]
+            comp_z_max = comp.bounds[1][2]
+            # Allow pieces that overlap or nearly touch the face (within margin)
+            gap = max(comp_z_min - fbb.max.Z, fbb.min.Z - comp_z_max)
+            if gap > margin:
+                if verbose:
+                    print(f"    Discarded stray: vol={vol:.0f}, "
+                          f"z={comp_z_min:.1f}..{comp_z_max:.1f}")
+                continue
+            good.append(comp)
+        support_pieces.extend(good)
 
         if verbose:
-            good = [c for c in components if abs(c.volume) >= min_volume]
             total = sum(abs(c.volume) for c in good)
             print(f"    {len(good)} pieces, vol={total:.0f} mm³")
 
