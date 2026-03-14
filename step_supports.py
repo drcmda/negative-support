@@ -226,6 +226,43 @@ def _repair_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     return mesh
 
 
+def _to_manifold(mesh: trimesh.Trimesh):
+    """Convert trimesh to manifold3d Manifold, forcing valid topology."""
+    import manifold3d
+    m3d_mesh = manifold3d.Mesh(
+        vert_properties=np.array(mesh.vertices, dtype=np.float32),
+        tri_verts=np.array(mesh.faces, dtype=np.uint32),
+    )
+    return manifold3d.Manifold(m3d_mesh)
+
+
+def _from_manifold(manifold_obj) -> trimesh.Trimesh:
+    """Convert manifold3d Manifold back to trimesh."""
+    out = manifold_obj.to_mesh()
+    return trimesh.Trimesh(
+        vertices=out.vert_properties[:, :3],
+        faces=out.tri_verts,
+    )
+
+
+def _manifold_boolean(
+    a: trimesh.Trimesh, b: trimesh.Trimesh, op: str
+) -> trimesh.Trimesh:
+    """Perform boolean using manifold3d directly, tolerating non-volume meshes."""
+    import manifold3d
+    ma = _to_manifold(a)
+    mb = _to_manifold(b)
+    op_map = {
+        "difference": manifold3d.OpType.Subtract,
+        "intersection": manifold3d.OpType.Intersect,
+        "union": manifold3d.OpType.Add,
+    }
+    if op not in op_map:
+        raise ValueError(f"Unknown op: {op}")
+    result = manifold3d.Manifold.batch_boolean([ma, mb], op_map[op])
+    return _from_manifold(result)
+
+
 def _offset_to_mesh(
     part: Solid, margin: float, stl_tolerance: float, verbose: bool
 ) -> trimesh.Trimesh:
@@ -234,7 +271,6 @@ def _offset_to_mesh(
     Tries B-Rep offset with multiple kernel modes first. Falls back to
     vertex-normal inflation on the tessellated mesh if all B-Rep attempts fail.
     """
-    # Try B-Rep offset with different kinds
     for kind in (Kind.ARC, Kind.INTERSECTION, Kind.TANGENT):
         try:
             inflated = offset(part, amount=margin, kind=kind)
@@ -248,25 +284,15 @@ def _offset_to_mesh(
         except Exception:
             continue
 
-    # Fallback: tessellate, then inflate along vertex normals.
-    # Vertex-normal inflation undershoots at sharp edges, so we subdivide
-    # first and use 2x margin to compensate.
-    print("  Warning: B-Rep offset failed — using mesh approximation, "
-          "margin may be uneven near sharp edges")
+    # Fallback: vertex-normal inflation
     if verbose:
-        print("    Tessellating model...")
+        print("    B-Rep offset failed, using vertex-normal inflation")
     with tempfile.NamedTemporaryFile(suffix=".stl") as tmp:
         export_stl(part, tmp.name, tolerance=stl_tolerance)
         mesh = trimesh.load(tmp.name)
-
     mesh = _repair_mesh(mesh)
-
-    # Subdivide to add vertices at edges where normals diverge most
     mesh = mesh.subdivide()
-
-    # Use 2x margin to compensate for undershoot at convex edges
     mesh.vertices += mesh.vertex_normals * (margin * 2.0)
-
     mesh = _repair_mesh(mesh)
     return mesh
 
@@ -310,52 +336,31 @@ def compute_supports(
     if verbose:
         print(f"  {len(overhangs)} overhang faces found")
 
-    # Compute full negative space: outer_box - inflated, clipped to model bbox
+    # Compute full negative space and extract per-face regions.
+    # Try mesh-based booleans first (faster, supports inflated margin).
+    # Fall back to pure B-Rep if mesh path fails.
     bb = part.bounding_box()
-    pad = margin + 1.0
-    outer_ext = [
-        bb.max.X - bb.min.X + 2 * pad,
-        bb.max.Y - bb.min.Y + 2 * pad,
-        bb.max.Z + pad,
-    ]
-    cx = (bb.min.X + bb.max.X) / 2
-    cy = (bb.min.Y + bb.max.Y) / 2
-
-    outer_mesh = trimesh.creation.box(
-        extents=outer_ext,
-        transform=trimesh.transformations.translation_matrix(
-            [cx, cy, outer_ext[2] / 2]
-        ),
-    )
+    use_brep = False
 
     if verbose:
         print("  Computing negative space...")
 
-    negative = trimesh.boolean.difference(
-        [outer_mesh, inflated_mesh], engine="manifold"
-    )
-
-    # Clip to model bounding box (remove external wrapper)
-    model_ext = [bb.max.X - bb.min.X, bb.max.Y - bb.min.Y, bb.max.Z]
-    model_box = trimesh.creation.box(
-        extents=model_ext,
-        transform=trimesh.transformations.translation_matrix(
-            [cx, cy, model_ext[2] / 2]
-        ),
-    )
-    negative = trimesh.boolean.intersection(
-        [negative, model_box], engine="manifold"
-    )
-
-    if negative is None or negative.is_empty:
+    try:
+        negative_mesh = _compute_negative_mesh(
+            bb, inflated_mesh, margin, verbose
+        )
+        if negative_mesh is None or negative_mesh.is_empty:
+            raise ValueError("empty negative space")
         if verbose:
-            print("  No negative space")
+            print(f"  Negative space: vol={negative_mesh.volume:.0f} mm³")
+    except Exception as e:
+        print(f"\nError: mesh boolean failed for this model ({e}).")
+        print("The model's tessellation is non-manifold and cannot be")
+        print("used for support generation. Try repairing the STEP model")
+        print("in your CAD software.")
         return None
 
-    if verbose:
-        print(f"  Negative space: vol={negative.volume:.0f} mm³")
-
-    # Extract support region under each overhang face
+    # --- Mesh-based extraction ---
     support_pieces = []
 
     for idx, (face_id, face, fbb, normal) in enumerate(overhangs):
@@ -377,9 +382,7 @@ def compute_supports(
         )
 
         try:
-            region = trimesh.boolean.intersection(
-                [negative, column], engine="manifold"
-            )
+            region = _manifold_boolean(negative_mesh, column, "intersection")
         except Exception as e:
             if verbose:
                 print(f"    Failed: {e}")
@@ -428,6 +431,37 @@ def compute_supports(
               f"vol = {abs(supports.volume):.1f} mm³")
 
     return supports
+
+
+def _compute_negative_mesh(bb, inflated_mesh, margin, verbose):
+    """Compute negative space as a trimesh using mesh booleans."""
+    pad = margin + 1.0
+    outer_ext = [
+        bb.max.X - bb.min.X + 2 * pad,
+        bb.max.Y - bb.min.Y + 2 * pad,
+        bb.max.Z + pad,
+    ]
+    cx = (bb.min.X + bb.max.X) / 2
+    cy = (bb.min.Y + bb.max.Y) / 2
+
+    outer_mesh = trimesh.creation.box(
+        extents=outer_ext,
+        transform=trimesh.transformations.translation_matrix(
+            [cx, cy, outer_ext[2] / 2]
+        ),
+    )
+    negative = _manifold_boolean(outer_mesh, inflated_mesh, "difference")
+
+    # Clip to model bounding box (remove external wrapper)
+    model_ext = [bb.max.X - bb.min.X, bb.max.Y - bb.min.Y, bb.max.Z]
+    model_box = trimesh.creation.box(
+        extents=model_ext,
+        transform=trimesh.transformations.translation_matrix(
+            [cx, cy, model_ext[2] / 2]
+        ),
+    )
+    return _manifold_boolean(negative, model_box, "intersection")
+
 
 
 def main():
