@@ -66,6 +66,10 @@ def find_overhang_faces(
          horizontal — 45° means any downward-facing surface steeper than 45°), OR
       2. It starts mid-air: its lowest edge has no model material below it,
          so the first printed layers would have nothing to attach to.
+
+    For curved faces (cylinders, etc.), normals are sampled across the surface
+    since the overhang angle varies. Only the overhanging portion is used
+    for the extraction column bounding box.
     """
     import math
 
@@ -76,22 +80,67 @@ def find_overhang_faces(
     overhang_faces = []
 
     for i, face in enumerate(part.faces()):
-        center = face.center()
-        normal = face.normal_at(center)
         bb = face.bounding_box()
 
         # Skip bottom faces sitting on build plate
         if bb.max.Z < 0.5:
             continue
 
-        # Skip upward-facing faces (normal Z > 0 = top surface)
-        if normal.Z >= 0:
+        center = face.center()
+        center_normal = face.normal_at(center)
+
+        # For curved faces, sample normals across the surface
+        is_planar = str(face.geom_type) == "GeomType.PLANE"
+        min_nz = center_normal.Z
+        extract_bb = bb  # bounding box used for column extraction
+
+        if not is_planar:
+            try:
+                tess = face.tessellate(0.1)
+                if tess and len(tess) >= 1:
+                    verts = tess[0]
+                    overhang_verts = []
+                    for v in verts:
+                        try:
+                            n = face.normal_at(v)
+                            if n.Z < min_nz:
+                                min_nz = n.Z
+                            if n.Z < nz_threshold:
+                                overhang_verts.append(
+                                    (v.X, v.Y, v.Z)
+                                )
+                        except Exception:
+                            pass
+
+                    # Use tighter bbox from overhanging vertices only
+                    if overhang_verts:
+                        ovh = np.array(overhang_verts)
+                        from types import SimpleNamespace
+
+                        tight_min = SimpleNamespace(
+                            X=float(ovh[:, 0].min()),
+                            Y=float(ovh[:, 1].min()),
+                            Z=float(ovh[:, 2].min()),
+                        )
+                        tight_max = SimpleNamespace(
+                            X=float(ovh[:, 0].max()),
+                            Y=float(ovh[:, 1].max()),
+                            Z=float(ovh[:, 2].max()),
+                        )
+                        extract_bb = SimpleNamespace(
+                            min=tight_min, max=tight_max
+                        )
+            except Exception:
+                pass
+
+        # Skip upward-facing faces (no part of the face points down)
+        if min_nz >= 0:
             continue
 
         reason = None
 
-        # Check 1: overhang angle
-        if normal.Z < nz_threshold:
+        # Check 1: overhang angle (use min_nz for curved faces)
+        if min_nz < nz_threshold:
             reason = "overhang"
         # Check 2: mid-air — lowest point has no model below it
         elif bb.min.Z > 0.5:
@@ -101,12 +150,16 @@ def find_overhang_faces(
         if reason is None:
             continue
 
-        overhang_faces.append((i, face, bb, normal))
+        overhang_faces.append((i, face, extract_bb, center_normal))
         if verbose:
-            deg = math.degrees(math.acos(-normal.Z))
-            print(f"    Face {i}: nz={normal.Z:.3f} ({deg:.0f}°), "
+            deg = math.degrees(math.acos(min(-min_nz, 1.0)))
+            extra = ""
+            if not is_planar and extract_bb is not bb:
+                extra = (f" [tight X={extract_bb.min.X:.1f}..{extract_bb.max.X:.1f},"
+                         f" Y={extract_bb.min.Y:.1f}..{extract_bb.max.Y:.1f}]")
+            print(f"    Face {i}: nz={min_nz:.3f} ({deg:.0f}°), "
                   f"z={bb.min.Z:.1f}..{bb.max.Z:.1f}, "
-                  f"area={face.area:.1f}, {reason}")
+                  f"area={face.area:.1f}, {reason}{extra}")
 
     return overhang_faces
 
