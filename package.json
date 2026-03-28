@@ -1,0 +1,21 @@
+{
+  "name": "negative-support-monorepo",
+  "private": true,
+  "scripts": {
+    "start": "npm run dev:server & npm run dev:frontend",
+    "dev": "npm run dev:frontend",
+    "dev:frontend": "npm run dev --prefix packages/frontend",
+    "dev:server": "npm run dev --prefix packages/server",
+    "build": "npm run build --prefix packages/frontend",
+    "deploy": "npm run build && npm run deploy:server",
+    "deploy:server": "cd packages/server && npx wrangler deploy",
+    "migrate": "npm run migrate --prefix packages/server",
+    "migrate:local": "npm run migrate:local --prefix packages/server",
+    "test": "cd packages/core && npm test",
+    "generate": "tsx packages/core/src/cli.ts",
+    "build:npm": "cd packages/core && npm run build"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0"
+  }
+}

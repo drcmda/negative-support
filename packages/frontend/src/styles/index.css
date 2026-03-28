@@ -1,0 +1,148 @@
+@import 'tailwindcss';
+
+/* ── Fonts ──────────────────────────────────────────────────── */
+
+@font-face {
+  font-family: 'Geist';
+  src: url('/fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('/fonts/GeistMono-Regular.woff2') format('woff2');
+  font-weight: 400 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Pixel Grid';
+  src: url('/fonts/GeistPixel-Grid.woff2') format('woff2');
+  font-weight: 500;
+  font-display: swap;
+}
+
+/* ── Theme ──────────────────────────────────────────────────── */
+
+@theme {
+  --color-base: #050505;
+  --color-base-alt: #0a0a0a;
+  --color-surface: rgba(255, 255, 255, 0.02);
+  --color-surface-bright: rgba(255, 255, 255, 0.04);
+  --color-border: rgba(255, 255, 255, 0.06);
+  --color-border-bright: rgba(255, 255, 255, 0.12);
+  --color-primary: #e4f0fb;
+  --color-dim: #a6accd;
+  --color-muted: #767c9d;
+  --color-accent: #5de4c7;
+  --color-accent-dim: rgba(93, 228, 199, 0.15);
+  --color-accent-glow: rgba(93, 228, 199, 0.08);
+  --color-code: #91b4d5;
+  --color-pink: #f087bd;
+  --color-pink-dim: rgba(240, 135, 189, 0.15);
+  --font-sans: 'Geist', system-ui, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, monospace;
+  --font-pixel-square: 'Geist Pixel Square', 'Geist Mono', monospace;
+  --font-pixel-grid: 'Geist Pixel Grid', 'Geist Mono', monospace;
+}
+
+/* ── Base ───────────────────────────────────────────────────── */
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background: var(--color-base);
+    color: var(--color-primary);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* ── Keyframes ──────────────────────────────────────────────── */
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes glow-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 20px var(--color-accent-glow);
+  }
+  50% {
+    box-shadow: 0 0 40px rgba(93, 228, 199, 0.1);
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* ── Utilities ──────────────────────────────────────────────── */
+
+@utility animate-fade-in-up {
+  animation: fade-in-up 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@utility animate-glow-pulse {
+  animation: glow-pulse 3s ease-in-out infinite;
+}
+
+@utility glass {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition: all 0.3s ease;
+}
+
+@utility glass-hover {
+  &:hover {
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+}
+
+@utility glow-accent {
+  box-shadow:
+    0 0 20px var(--color-accent-glow),
+    0 0 0 1px var(--color-accent-dim);
+}
+
+@utility label-xs {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}

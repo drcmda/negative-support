@@ -1,0 +1,6 @@
+[submodule "core"]
+	path = packages/core
+	url = https://github.com/drcmda/negative-support-core
+[submodule "packages/core"]
+	path = packages/core
+	url = https://github.com/drcmda/negative-support-core

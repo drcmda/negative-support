@@ -1,0 +1,210 @@
+/**
+ * Web Worker: compute negative-space supports.
+ *
+ * All algorithm logic lives in @core — this worker is just the browser glue:
+ * - Browser-compatible WASM initialization (manifold-3d, occt-import-js)
+ * - File parsing dispatch
+ * - 3MF packaging (needs both model + support mesh)
+ */
+
+// @ts-ignore — Vite ?url import for WASM file
+import wasmUrl from 'manifold-3d/manifold.wasm?url';
+import type { ParsedMesh, STEPFaceInfo } from '@core/types';
+import { parseSTL, exportSTL } from '@core/stl';
+import { parseOBJ } from '@core/obj';
+import { parseSTEP } from '../lib/step';
+import { repairMesh, computeMeshOverhangs } from '@core/mesh-utils';
+import { export3MF } from '@core/threemf';
+import { getManifold, generateSupportsMesh, generateSupportsMeshOverhang, generateSupportsSTEP } from '@core/supports';
+
+// -- Message types --
+
+interface GenerateMessage {
+  type: 'generate';
+  fileBuffer: ArrayBuffer;
+  fileName: string;
+  margin: number;
+  angle: number;
+  minVolume: number;
+  skipMerge?: boolean;
+}
+
+type InMessage = GenerateMessage;
+
+interface ProgressMessage {
+  type: 'progress';
+  step: string;
+  detail?: string;
+}
+
+interface ResultMessage {
+  type: 'result';
+  stlBuffer: ArrayBuffer;
+  threemfBuffer: ArrayBuffer;
+  stats: {
+    pieces: number; faces: number; volume: number;
+    modelVertices: number; modelFaces: number;
+    supportVertices: number; supportFaces: number;
+    margin: number; format: string;
+  };
+  modelVertices: Float32Array;
+  modelFaces: Uint32Array;
+  supportVertices: Float32Array;
+  supportFaces: Uint32Array;
+}
+
+interface ErrorMessage {
+  type: 'error';
+  message: string;
+}
+
+type OutMessage = ProgressMessage | ResultMessage | ErrorMessage;
+
+function progress(step: string, detail?: string) {
+  self.postMessage({ type: 'progress', step, detail } satisfies ProgressMessage);
+}
+
+// -- Worker entry --
+
+self.onmessage = async (e: MessageEvent<InMessage>) => {
+  const msg = e.data;
+  if (msg.type !== 'generate') return;
+
+  try {
+    // Initialize manifold-3d WASM with browser-compatible locateFile
+    progress('Initialize', 'Loading WASM engine...');
+    await getManifold(wasmUrl);
+    progress('Initialize', 'Ready');
+
+    // Parse input file
+    const ext = msg.fileName.toLowerCase().split('.').pop() || '';
+    progress('Parse', `Loading ${msg.fileName}...`);
+
+    let parsed: ParsedMesh;
+    let stepFaces: STEPFaceInfo[] | null = null;
+
+    if (ext === 'stl') {
+      parsed = parseSTL(msg.fileBuffer);
+    } else if (ext === 'obj') {
+      parsed = parseOBJ(msg.fileBuffer);
+    } else if (ext === 'step' || ext === 'stp') {
+      progress('Parse', 'Loading OpenCascade WASM (first time may take a moment)...');
+      // Store buffer + tessellation params for potential retries
+      const stepResult = await parseSTEP(msg.fileBuffer);
+      parsed = stepResult.mesh;
+      stepFaces = stepResult.faces;
+    } else {
+      self.postMessage({
+        type: 'error',
+        message: `Unsupported format: .${ext}. Use STL, OBJ, or STEP.`,
+      } satisfies ErrorMessage);
+      return;
+    }
+
+    const vertCount = parsed.vertices.length / 3;
+    const triCount = parsed.faces.length / 3;
+    progress('Parse', `${vertCount.toLocaleString()} vertices, ${triCount.toLocaleString()} triangles`);
+
+    // Repair mesh
+    progress('Repair', 'Checking mesh...');
+    const repaired = repairMesh(parsed);
+    if (repaired !== parsed) {
+      const removedFaces = triCount - repaired.faces.length / 3;
+      progress('Repair', `Fixed: removed ${removedFaces} bad faces`);
+      parsed = repaired;
+    } else {
+      progress('Repair', 'Mesh OK');
+    }
+
+    // Save model mesh copy for 3MF (pipeline modifies vertices in-place)
+    const modelMesh: ParsedMesh = {
+      vertices: new Float32Array(parsed.vertices),
+      faces: new Uint32Array(parsed.faces),
+    };
+
+    // Run the appropriate pipeline from core
+    let result;
+    if (stepFaces) {
+      try {
+        result = generateSupportsSTEP(parsed, stepFaces, msg.margin, msg.angle, msg.minVolume, progress, msg.skipMerge);
+      } catch {
+        // STEP tessellation issues — fall back to mesh pipeline
+        progress('Fallback', 'STEP pipeline failed, using mesh pipeline');
+        stepFaces = null;
+      }
+    }
+    if (!stepFaces && !result) {
+      // Try overhang detection for mesh files (STL/OBJ)
+      progress('Overhang', 'Detecting overhangs...');
+      const overhangClusters = computeMeshOverhangs(parsed, msg.angle);
+      if (overhangClusters.length > 0) {
+        progress('Overhang', `${overhangClusters.length} regions detected`);
+        result = generateSupportsMeshOverhang(parsed, overhangClusters, msg.margin, msg.angle, msg.minVolume, progress, msg.skipMerge);
+      } else {
+        progress('Overhang', 'No overhangs — full shell');
+        result = generateSupportsMesh(parsed, msg.margin, msg.minVolume, progress, msg.skipMerge);
+      }
+    }
+
+    if (!result) throw new Error('Support generation failed — no result produced.');
+
+    // Export 3MF (model + supports)
+    progress('Export', 'Writing 3MF...');
+    const threemfBuffer = export3MF(modelMesh, result.supportPieces);
+
+    // Debug: check coordinate alignment between model and supports
+    {
+      let mzMin = Infinity, mzMax = -Infinity;
+      for (let i = 2; i < modelMesh.vertices.length; i += 3) {
+        if (modelMesh.vertices[i] < mzMin) mzMin = modelMesh.vertices[i];
+        if (modelMesh.vertices[i] > mzMax) mzMax = modelMesh.vertices[i];
+      }
+      let szMin = Infinity, szMax = -Infinity;
+      for (let i = 2; i < result.supportMesh.vertices.length; i += 3) {
+        if (result.supportMesh.vertices[i] < szMin) szMin = result.supportMesh.vertices[i];
+        if (result.supportMesh.vertices[i] > szMax) szMax = result.supportMesh.vertices[i];
+      }
+      console.log(`[DEBUG] Model Z: ${mzMin.toFixed(2)} to ${mzMax.toFixed(2)}`);
+      console.log(`[DEBUG] Support Z: ${szMin.toFixed(2)} to ${szMax.toFixed(2)}`);
+      console.log(`[DEBUG] Overlap: ${szMin <= mzMax && szMax >= mzMin}`);
+    }
+
+    // Copy model mesh for viewer (modelMesh buffers are consumed by transfer)
+    const viewerModelVerts = new Float32Array(modelMesh.vertices);
+    const viewerModelFaces = new Uint32Array(modelMesh.faces);
+
+    const out: ResultMessage = {
+      type: 'result',
+      stlBuffer: result.stl,
+      threemfBuffer,
+      stats: {
+        ...result.stats,
+        modelVertices: modelMesh.vertices.length / 3,
+        modelFaces: modelMesh.faces.length / 3,
+        supportVertices: result.supportMesh.vertices.length / 3,
+        supportFaces: result.supportMesh.faces.length / 3,
+        margin: msg.margin,
+        format: ext.toUpperCase(),
+      },
+      modelVertices: viewerModelVerts,
+      modelFaces: viewerModelFaces,
+      supportVertices: result.supportMesh.vertices,
+      supportFaces: result.supportMesh.faces,
+    };
+    self.postMessage(out, {
+      transfer: [
+        result.stl,
+        threemfBuffer,
+        viewerModelVerts.buffer,
+        viewerModelFaces.buffer,
+        result.supportMesh.vertices.buffer,
+        result.supportMesh.faces.buffer,
+      ],
+    });
+  } catch (err) {
+    self.postMessage({
+      type: 'error',
+      message: err instanceof Error ? err.message : String(err),
+    } satisfies ErrorMessage);
+  }
+};
