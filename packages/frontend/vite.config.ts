@@ -1,10 +1,16 @@
 import { defineConfig } from "vite";
 import { resolve } from "path";
+import { readFileSync } from "fs";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import wasm from "vite-plugin-wasm";
 
+const coreVersion = JSON.parse(readFileSync(resolve(__dirname, "../core/package.json"), "utf-8")).version;
+
 export default defineConfig({
+  define: {
+    __CORE_VERSION__: JSON.stringify(coreVersion),
+  },
   plugins: [tailwindcss(), react(), wasm()],
   resolve: {
     alias: {

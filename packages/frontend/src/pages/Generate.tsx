@@ -1,3 +1,4 @@
+declare const __CORE_VERSION__: string;
 import { useState, useRef, useCallback, useEffect, lazy, Suspense } from 'react'
 import FileDropZone from '../components/FileDropZone'
 import ProgressSteps, { type Step } from '../components/ProgressSteps'
@@ -237,6 +238,7 @@ export default function Generate() {
         {/* Header */}
         <div className='flex items-center gap-3 mb-4'>
           <p className='label-xs tracking-[0.14em]'>Browser</p>
+          <span className='font-mono text-[10px] text-muted/40'>v{__CORE_VERSION__}</span>
           {licensed && (
             <span className='inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-mono tracking-wider text-accent border border-accent/20 bg-accent-glow'>
               <svg width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='3'>
