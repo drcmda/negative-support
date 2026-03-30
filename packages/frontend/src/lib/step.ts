@@ -30,7 +30,7 @@ async function getOcct() {
 export async function parseSTEP(buffer: ArrayBuffer, params?: any): Promise<STEPParseResult> {
   const occt = await getOcct()
   const fileContent = new Uint8Array(buffer)
-  const result = occt.ReadStepFile(fileContent, params ?? null)
+  const result = occt.ReadStepFile(fileContent, params ?? { linearDeflection: 0.05, angularDeflection: 0.1 })
 
   if (!result.success || !result.meshes || result.meshes.length === 0) {
     throw new Error('Failed to parse STEP file — no geometry found.')

@@ -51,6 +51,14 @@ function notFound(): Response {
   });
 }
 
+/** Add cross-origin isolation headers for SharedArrayBuffer (required by manifold-3d TBB). */
+function addIsolationHeaders(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set("Cross-Origin-Opener-Policy", "same-origin");
+  headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -94,24 +102,26 @@ export default {
 
     // Static assets from web/dist/ via KV
     try {
-      return await getAssetFromKV(
+      const res = await getAssetFromKV(
         { request, waitUntil: ctx.waitUntil.bind(ctx) },
         {
           ASSET_NAMESPACE: env.__STATIC_CONTENT,
           ASSET_MANIFEST: assetManifest,
         },
       );
+      return addIsolationHeaders(res);
     } catch {
       // SPA fallback: serve index.html for all non-API, non-asset routes
       try {
         const indexReq = new Request(new URL("/index.html", url.origin).toString(), request);
-        return await getAssetFromKV(
+        const res = await getAssetFromKV(
           { request: indexReq, waitUntil: ctx.waitUntil.bind(ctx) },
           {
             ASSET_NAMESPACE: env.__STATIC_CONTENT,
             ASSET_MANIFEST: assetManifest,
           },
         );
+        return addIsolationHeaders(res);
       } catch {
         return notFound();
       }

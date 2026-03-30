@@ -23,6 +23,10 @@ export default defineConfig({
     proxy: {
       "/api": "http://localhost:8787",
     },
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+    },
   },
   worker: {
     format: "es",
